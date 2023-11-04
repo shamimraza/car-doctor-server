@@ -1,16 +1,21 @@
 const express = require('express');
-const cors = require('cors');
-const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require('dotenv').config();
+const cors = require('cors');
+const jwt = require('jsonwebtoken');
+const cookieParser = require('cookie-parser')
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const app = express();
 const port = process.env.PORT || 5000;
 
 // middle wire
 
-app.use(cors());
+app.use(cors({
+    origin: ['http://localhost:5173'],
+    credentials: true
+}));
 app.use(express.json());
+app.use(cookieParser())
 
-console.log(process.env.DB_PASS);
 
 
 
@@ -26,6 +31,33 @@ const client = new MongoClient(uri, {
     }
 });
 
+
+//middleware
+
+const logger = async (req, res, next) => {
+    console.log('called', req.host, req.originalUrl);
+    next();
+}
+
+const verifyToken = async (req, res, next) => {
+    const token = req.cookies?.token;
+    if (!token) {
+        return res.status(401).send({ message: 'not authorized' })
+    }
+    jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+        //err
+        if (err) {
+            console.log(err);
+            return res.status(401).send({ message: 'unauthorized' })
+        }
+        // if token is valid then it would be decoded
+        console.log('value in the token', decoded)
+        req.decoded = decoded;
+        next()
+
+    })
+}
+
 async function run() {
     try {
         // Connect the client to the server	(optional starting in v4.7)
@@ -34,7 +66,33 @@ async function run() {
         const serviceCollection = client.db('cardoctor').collection('services');
         const bookingCollection = client.db('cardoctor').collection('bookings')
 
-        app.get('/services', async (req, res) => {
+        // auth related api
+
+        // jwt.sign({
+        //     data: 'foobar'
+        // }, 'secret', { expiresIn: '1h' });
+
+        app.post('/jwt', logger, async (req, res) => {
+            const user = req.body;
+            console.log(user);
+            const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' })
+            res.cookie('token', token, {
+                httpOnly: true,
+                secure: process.env.NODE_ENV === 'production',
+                sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
+            })
+                .send({ status: true })
+
+        })
+
+        app.post('/logout', async (req, res) => {
+            const user = req.body;
+            console.log('logged out', user);
+            res.clearCookie('token', { maxAge: 0 }).send({ success: true })
+        })
+
+
+        app.get('/services', logger, async (req, res) => {
             const cursor = serviceCollection.find();
             const result = await cursor.toArray();
             res.send(result);
@@ -54,12 +112,18 @@ async function run() {
 
 
         //bookings
-        app.get('/bookings', async (req, res) => {
-            console.log(req.query.email);
-            let query = {};
-            if (req.query?.email) {
-                query = { email: req.query.email }
+
+        app.get('/bookings', logger, verifyToken, async (req, res) => {
+            const email = req.query.email
+            if (!email) {
+                res.send([])
             }
+            // check valid user
+            const decodedEmail = req.decoded.email
+            if (email !== decodedEmail) {
+                res.status(403).send({ message: 'Forbidden Access' })
+            }
+            const query = { email: email }
             const result = await bookingCollection.find().toArray();
             res.send(result)
         })
@@ -70,6 +134,26 @@ async function run() {
             const result = await bookingCollection.insertOne(booking)
             res.send(result)
         })
+
+        // update 
+
+        app.patch('/bookings/:id', async (req, res) => {
+            const id = req.params.id;
+            const filter = { _id: new ObjectId(id) }
+            const updateBooking = req.body;
+            console.log(updateBooking);
+            const updateDoc = {
+                $set: {
+                    status: updateBooking.status
+                },
+            };
+            const result = await bookingCollection.updateOne(filter, updateDoc)
+            console.log(result);
+            res.send(result)
+
+        })
+
+        // delete method
 
         app.delete('/bookings/:id', async (req, res) => {
             const id = req.params.id;
